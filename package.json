@@ -1,0 +1,13 @@
+{
+  "name": "moneyware-auth",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MoneyWare key auth server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
