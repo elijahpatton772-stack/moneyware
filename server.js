@@ -20,6 +20,7 @@ const SEED_DB     = path.join(HERE, "db.json");           // shipped copy: keys 
 const DB_PATH     = process.env.DB_PATH || SEED_DB;       // in prod, point this at a PERSISTENT volume
 const PAYLOAD_LUA = process.env.PAYLOAD_LUA || path.join(HERE, "payload.lua");  // your real MoneyWare script
 const PORT        = process.env.PORT || 8080;
+const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK || "";   // optional: set to enable live alerts
 
 // On a fresh persistent volume the db file won't exist yet — seed it ONCE from
 // the shipped db.json so your 100 keys + pepper + admin token are present.
@@ -97,6 +98,43 @@ function requireAdmin(body) {
   return body && typeof body.token === "string" && timingSafeEq(body.token, db.admin_token);
 }
 
+// --- Discord alerts (optional; set DISCORD_WEBHOOK env to turn on) -----------
+// Fire-and-forget: a dead/slow Discord can NEVER stall or break an auth.
+function notifyDiscord(kind, key, rec, hwid, ip) {
+  if (!DISCORD_WEBHOOK) return;
+  const styles = {
+    activation: { title: "🟢 Key Activated",               color: 0x2ecc71 },
+    theft:      { title: "🔴 Stolen / Shared Key Blocked",  color: 0xe74c3c },
+    banned:     { title: "⛔ Revoked Key Attempted",        color: 0xe67e22 },
+    expired:    { title: "🟡 Expired Key Attempted",        color: 0xf1c40f },
+  };
+  const st = styles[kind] || { title: "MoneyWare event", color: 0x8a6eff };
+  const cut = (s) => "`" + String(s).slice(0, 60) + "`";
+  const fields = [
+    { name: "Key",  value: cut(String(key).trim().toUpperCase()), inline: true },
+    { name: "Tier", value: rec ? rec.tier : "?",                  inline: true },
+  ];
+  if (kind === "theft") {
+    fields.push({ name: "Locked to HWID",       value: cut(rec.hwid), inline: false });
+    fields.push({ name: "Attempted from HWID",  value: cut(hwid),     inline: false });
+  } else {
+    fields.push({ name: "HWID", value: cut(hwid), inline: false });
+  }
+  fields.push({ name: "IP", value: String(ip), inline: true });
+
+  const payload = {
+    username: "MoneyWare",
+    embeds: [{ title: st.title, color: st.color, fields, timestamp: new Date().toISOString() }],
+  };
+  try {
+    fetch(DISCORD_WEBHOOK, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).catch(() => {});
+  } catch (_) {}
+}
+
 // --- /auth -------------------------------------------------------------------
 async function handleAuth(req, res) {
   const ip = clientIP(req);
@@ -111,7 +149,8 @@ async function handleAuth(req, res) {
 
   const rec = db.keys[keyHash(body.key)];
   if (!rec)          return send(res, 200, { ok: false, reason: "invalid" });
-  if (rec.banned)    return send(res, 200, { ok: false, reason: "banned" });
+  if (rec.banned)  { notifyDiscord("banned", body.key, rec, hwid, ip);
+                     return send(res, 200, { ok: false, reason: "banned" }); }
 
   const now = Math.floor(Date.now() / 1000);
 
@@ -121,13 +160,17 @@ async function handleAuth(req, res) {
     rec.redeemed_at = now;
     if (rec.duration_days) rec.expires_at = now + rec.duration_days * 86400;
     saveDB();
+    notifyDiscord("activation", body.key, rec, hwid, ip);
   } else if (!timingSafeEq(rec.hwid, hwid)) {
     // key is bound to a DIFFERENT machine -> stolen / shared -> denied, always.
+    notifyDiscord("theft", body.key, rec, hwid, ip);
     return send(res, 200, { ok: false, reason: "hwid_mismatch" });
   }
 
-  if (rec.expires_at && now > rec.expires_at)
+  if (rec.expires_at && now > rec.expires_at) {
+    notifyDiscord("expired", body.key, rec, hwid, ip);
     return send(res, 200, { ok: false, reason: "expired", expires_at: rec.expires_at });
+  }
 
   // PASSED. hand over the real script (read fresh so you can update it live).
   let payload = "";
@@ -189,6 +232,7 @@ server.listen(PORT, () => {
   console.log(" MoneyWare server up on port " + PORT);
   console.log(" keys loaded : " + Object.keys(db.keys).length);
   console.log(" payload     : " + (fs.existsSync(PAYLOAD_LUA) ? "loaded" : "!! payload.lua MISSING !!"));
+  console.log(" alerts      : " + (DISCORD_WEBHOOK ? "ON (Discord)" : "off (set DISCORD_WEBHOOK)"));
   console.log(" endpoints   : POST /auth  |  POST /admin/{list,ban,unban,reset-hwid}");
   console.log("=".repeat(56));
 });
